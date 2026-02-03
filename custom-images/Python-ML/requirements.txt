@@ -1,5 +1,6 @@
-mlflow
 pandas
-scikit-learn
 numpy
-boto3
+scikit-learn
+matplotlib
+joblib
+mlflow

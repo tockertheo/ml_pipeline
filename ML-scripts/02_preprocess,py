@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import os
+import pandas as pd
+import joblib
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+
+
+TARGET_COL = "RainTomorrow"
+DROP_COLS = ["RISK_MM"]  # leakage
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
+    if "Date" not in df.columns:
+        return df
+    d = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.copy()
+    df["Year"] = d.dt.year
+    df["Month"] = d.dt.month
+    df["Day"] = d.dt.day
+    df = df.drop(columns=["Date"])
+    return df
+
+
+def make_xy(df: pd.DataFrame):
+    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns], errors="ignore")
+    df = add_date_features(df)
+
+    if TARGET_COL not in df.columns:
+        raise ValueError(f"Target column '{TARGET_COL}' not found in dataset.")
+
+    y = df[TARGET_COL].map({"No": 0, "Yes": 1})
+    X = df.drop(columns=[TARGET_COL])
+
+    # Optional: drop rows where y is missing/unmapped
+    mask = y.notna()
+    X = X.loc[mask].reset_index(drop=True)
+    y = y.loc[mask].astype(int).reset_index(drop=True)
+
+    return X, y
+
+
+def build_preprocess_pipeline(X: pd.DataFrame):
+    cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
+    num_cols = [c for c in X.columns if c not in cat_cols]
+
+    numeric = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+    ])
+
+    categorical = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+    ])
+
+    pre = ColumnTransformer(
+        transformers=[
+            ("num", numeric, num_cols),
+            ("cat", categorical, cat_cols),
+        ],
+        remainder="drop",
+    )
+    return pre, num_cols, cat_cols
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Preprocessing for weatherAUS.csv")
+    ap.add_argument("--data-path", type=str, required=True, help="Path to weatherAUS.csv")
+    ap.add_argument("--out-dir", type=str, default="artifacts/preprocess", help="Output directory")
+    ap.add_argument("--test-size", type=float, default=TEST_SIZE, help="Test size fraction")
+    ap.add_argument("--random-state", type=int, default=RANDOM_STATE, help="Random state")
+    args = ap.parse_args()
+
+    ensure_dir(args.out_dir)
+
+    df = pd.read_csv(args.data_path)
+    X, y = make_xy(df)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=args.test_size,
+        random_state=args.random_state,
+        stratify=y
+    )
+
+    preprocess, num_cols, cat_cols = build_preprocess_pipeline(X_train)
+
+    # Fit preprocessing on train only
+    preprocess.fit(X_train)
+
+    # Save splits
+    X_train.to_csv(os.path.join(args.out_dir, "X_train.csv"), index=False)
+    X_test.to_csv(os.path.join(args.out_dir, "X_test.csv"), index=False)
+    y_train.to_csv(os.path.join(args.out_dir, "y_train.csv"), index=False, header=True)
+    y_test.to_csv(os.path.join(args.out_dir, "y_test.csv"), index=False, header=True)
+
+    # Save pipeline + metadata
+    joblib.dump(preprocess, os.path.join(args.out_dir, "preprocess.joblib"))
+    meta = {
+        "target_col": TARGET_COL,
+        "drop_cols": DROP_COLS,
+        "num_cols": num_cols,
+        "cat_cols": cat_cols,
+        "test_size": args.test_size,
+        "random_state": args.random_state,
+    }
+    pd.Series(meta).to_json(os.path.join(args.out_dir, "preprocess_meta.json"), indent=2)
+
+    print(f"[OK] Preprocessing artifacts written to: {args.out_dir}")
+
+
+if __name__ == "__main__":
+    main()
